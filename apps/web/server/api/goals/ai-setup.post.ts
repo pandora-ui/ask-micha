@@ -56,26 +56,37 @@ function isUrlSafe(urlStr: string): boolean {
     const parsed = new URL(urlStr);
 
     // Only allow http(s)
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      return false;
 
     const hostname = parsed.hostname.toLowerCase();
 
     // Block localhost / loopback
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return false;
-    if (hostname.endsWith(".local") || hostname.endsWith(".internal")) return false;
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1"
+    )
+      return false;
+    if (hostname.endsWith(".local") || hostname.endsWith(".internal"))
+      return false;
 
     // Block link-local / metadata
-    if (hostname.startsWith("169.254.") || hostname === "metadata.google.internal") return false;
+    if (
+      hostname.startsWith("169.254.") ||
+      hostname === "metadata.google.internal"
+    )
+      return false;
 
     // Block private IP ranges
     const parts = hostname.split(".");
     if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p))) {
       const a = Number(parts[0]);
       const b = Number(parts[1]);
-      if (a === 10) return false;                              // 10.x.x.x
-      if (a === 172 && b >= 16 && b <= 31) return false;      // 172.16-31.x.x
-      if (a === 192 && b === 168) return false;                // 192.168.x.x
-      if (a === 0) return false;                               // 0.x.x.x
+      if (a === 10) return false; // 10.x.x.x
+      if (a === 172 && b >= 16 && b <= 31) return false; // 172.16-31.x.x
+      if (a === 192 && b === 168) return false; // 192.168.x.x
+      if (a === 0) return false; // 0.x.x.x
     }
 
     return true;
@@ -102,7 +113,7 @@ async function validateFeedUrl(url: string): Promise<{
 
     const response = await fetch(url, {
       signal: controller.signal,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; RSS-Validator/1.0)" }
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; RSS-Validator/1.0)" },
     });
 
     if (!response.ok) {
@@ -113,7 +124,10 @@ async function validateFeedUrl(url: string): Promise<{
     const text = await response.text();
     clearTimeout(timer);
 
-    const isRss = text.includes("<rss") || text.includes("<feed") || text.includes("<rdf:RDF");
+    const isRss =
+      text.includes("<rss") ||
+      text.includes("<feed") ||
+      text.includes("<rdf:RDF");
 
     if (!isRss) {
       return { valid: false, error: "Not an RSS/Atom feed" };
@@ -140,14 +154,20 @@ export default defineEventHandler(async (event) => {
   const apiKey = config.openAiApiKey;
 
   if (!apiKey) {
-    throw createError({ statusCode: 500, message: "OpenAI API key not configured" });
+    throw createError({
+      statusCode: 500,
+      message: "OpenAI API key not configured",
+    });
   }
 
   const body = (await readBody(event)) as AiSetupRequest;
   const description = (body.description ?? "").trim();
 
   if (!description || description.length < 5) {
-    throw createError({ statusCode: 400, message: "Please provide a description of at least 5 characters" });
+    throw createError({
+      statusCode: 400,
+      message: "Please provide a description of at least 5 characters",
+    });
   }
 
   // Get existing source URLs to avoid duplicates
@@ -156,9 +176,10 @@ export default defineEventHandler(async (event) => {
   const currentPolicy = policyResult?.policy ?? defaultSourcePolicy();
   const existingUrls = new Set(currentPolicy.sources.map((s) => s.url));
 
-  const existingList = existingUrls.size > 0
-    ? `\nAlready configured sources (do NOT suggest these URLs): ${[...existingUrls].join(", ")}`
-    : "";
+  const existingList =
+    existingUrls.size > 0
+      ? `\nAlready configured sources (do NOT suggest these URLs): ${[...existingUrls].join(", ")}`
+      : "";
 
   const model = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 
@@ -167,8 +188,8 @@ export default defineEventHandler(async (event) => {
     "A user described what they want to find or monitor. Your job is to:",
     "",
     "1. Decide the best result_mode based on the user's intent:",
-    "   - \"sources\": if the user wants ONGOING MONITORING of a topic (e.g. \"track AI news\", \"monitor competitor launches\", \"follow security advisories\"). Return RSS feed URLs to subscribe to.",
-    "   - \"content\": if the user wants IMMEDIATE RESULTS / SPECIFIC ITEMS (e.g. \"find newest cinema movies\", \"best restaurants in Berlin\", \"top Python libraries for ML\"). Return a curated list of actual content items directly.",
+    '   - "sources": if the user wants ONGOING MONITORING of a topic (e.g. "track AI news", "monitor competitor launches", "follow security advisories"). Return RSS feed URLs to subscribe to.',
+    '   - "content": if the user wants IMMEDIATE RESULTS / SPECIFIC ITEMS (e.g. "find newest cinema movies", "best restaurants in Berlin", "top Python libraries for ML"). Return a curated list of actual content items directly.',
     "",
     "2. Create a structured goal configuration from their description",
     "3. Based on result_mode, either find RSS sources OR return content items",
@@ -178,66 +199,69 @@ export default defineEventHandler(async (event) => {
     "",
     "Return strict JSON with these keys:",
     "",
-    "\"result_mode\": \"sources\" or \"content\"",
+    '"result_mode": "sources" or "content"',
     "",
-    "\"goal\": {",
-    "  \"name\": \"short descriptive name for the goal (3-50 chars)\",",
-    "  \"focus_topics\": [\"array of 3-8 relevant topic keywords, lowercase\"],",
-    "  \"excluded_topics\": [\"array of 0-5 topics to exclude, lowercase\"],",
-    "  \"must_include_keywords\": [\"array of 0-5 critical keywords, lowercase\"],",
-    "  \"target_audience\": \"one of: General, Executive team, Product leadership, Engineering management, Marketing leadership, Research team\",",
-    "  \"lookback_days\": number (1-60),",
-    "  \"max_items\": number (5-50)",
+    '"goal": {',
+    '  "name": "short descriptive name for the goal (3-50 chars)",',
+    '  "focus_topics": ["array of 3-8 relevant topic keywords, lowercase"],',
+    '  "excluded_topics": ["array of 0-5 topics to exclude, lowercase"],',
+    '  "must_include_keywords": ["array of 0-5 critical keywords, lowercase"],',
+    '  "target_audience": "one of: General, Executive team, Product leadership, Engineering management, Marketing leadership, Research team",',
+    '  "lookback_days": number (1-60),',
+    '  "max_items": number (5-50)',
     "}",
     "",
-    "IF result_mode is \"sources\", also include:",
-    "\"sources\": [",
+    'IF result_mode is "sources", also include:',
+    '"sources": [',
     "  {",
-    "    \"url\": \"real publicly accessible RSS/Atom feed URL\",",
-    "    \"type\": \"rss\",",
-    "    \"label\": \"descriptive label for the source\",",
-    "    \"weight\": number (0.05-0.5),",
-    "    \"reason\": \"brief reason why this source is relevant\"",
+    '    "url": "real publicly accessible RSS/Atom feed URL",',
+    '    "type": "rss",',
+    '    "label": "descriptive label for the source",',
+    '    "weight": number (0.05-0.5),',
+    '    "reason": "brief reason why this source is relevant"',
     "  }",
     "]",
     "",
-    "IF result_mode is \"content\", also include:",
-    "\"content_items\": [",
+    'IF result_mode is "content", also include:',
+    '"content_items": [',
     "  {",
-    "    \"title\": \"name/title of the item\",",
-    "    \"url\": \"link to the item (real URL)\",",
-    "    \"description\": \"brief description (1-2 sentences)\",",
-    "    \"source\": \"where this info comes from (e.g. IMDb, Wikipedia, official site)\",",
-    "    \"relevance\": \"why this item matches the user's request\"",
+    '    "title": "name/title of the item",',
+    '    "url": "link to the item (real URL)",',
+    '    "description": "brief description (1-2 sentences)",',
+    '    "source": "where this info comes from (e.g. IMDb, Wikipedia, official site)",',
+    '    "relevance": "why this item matches the user\'s request"',
     "  }",
     "]",
     "",
     "Requirements:",
-    "- For sources mode: only suggest REAL, publicly accessible RSS/Atom feed URLs. Prefer well-known, reliable sources. type must be \"rss\" or \"api\". Do NOT suggest sources already in the existing list.",
+    '- For sources mode: only suggest REAL, publicly accessible RSS/Atom feed URLs. Prefer well-known, reliable sources. type must be "rss" or "api". Do NOT suggest sources already in the existing list.',
     "- For content mode: return 5-20 actual, real content items that directly answer the user's query. Use real URLs. Be specific and current.",
     "- Infer the best goal parameters from the user's natural language description",
     "- If the description is vague, make reasonable assumptions",
     "",
-    "IMPORTANT: Choose \"content\" mode when the user is asking for specific things (items, products, movies, places, tools, etc). Choose \"sources\" mode when they want to track/monitor/follow a topic over time."
+    'IMPORTANT: Choose "content" mode when the user is asking for specific things (items, products, movies, places, tools, etc). Choose "sources" mode when they want to track/monitor/follow a topic over time.',
   ].join("\n");
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       model,
-      temperature: 0.7,
+      temperature: 1.0,
       response_format: { type: "json_object" },
-      messages: [{ role: "user", content: prompt }]
-    })
+      messages: [{ role: "user", content: prompt }],
+    }),
   });
 
   if (!response.ok) {
     const errorBody = await response.text();
-    throw createError({ statusCode: 502, message: `OpenAI API error ${response.status}: ${errorBody}` });
+    throw createError({
+      statusCode: 502,
+      message: `OpenAI API error ${response.status}: ${errorBody}`,
+    });
   }
 
   const data = (await response.json()) as {
@@ -275,7 +299,10 @@ export default defineEventHandler(async (event) => {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw createError({ statusCode: 502, message: "OpenAI returned invalid JSON" });
+    throw createError({
+      statusCode: 502,
+      message: "OpenAI returned invalid JSON",
+    });
   }
 
   // Determine result mode
@@ -286,12 +313,21 @@ export default defineEventHandler(async (event) => {
   const aiGoal = parsed.goal ?? {};
   const goal: GeneratedGoal = {
     name: (aiGoal.name ?? "Intelligence Watch").slice(0, 50),
-    focus_topics: (aiGoal.focus_topics ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 8),
-    excluded_topics: (aiGoal.excluded_topics ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 5),
-    must_include_keywords: (aiGoal.must_include_keywords ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 5),
+    focus_topics: (aiGoal.focus_topics ?? [])
+      .map((t) => String(t).toLowerCase().trim())
+      .filter(Boolean)
+      .slice(0, 8),
+    excluded_topics: (aiGoal.excluded_topics ?? [])
+      .map((t) => String(t).toLowerCase().trim())
+      .filter(Boolean)
+      .slice(0, 5),
+    must_include_keywords: (aiGoal.must_include_keywords ?? [])
+      .map((t) => String(t).toLowerCase().trim())
+      .filter(Boolean)
+      .slice(0, 5),
     target_audience: aiGoal.target_audience ?? "General",
     lookback_days: Math.min(60, Math.max(1, aiGoal.lookback_days ?? 7)),
-    max_items: Math.min(50, Math.max(5, aiGoal.max_items ?? 20))
+    max_items: Math.min(50, Math.max(5, aiGoal.max_items ?? 20)),
   };
 
   if (resultMode === "content") {
@@ -303,7 +339,7 @@ export default defineEventHandler(async (event) => {
         url: item.url!,
         description: item.description ?? "",
         source: item.source ?? "",
-        relevance: item.relevance ?? "Matches your search criteria"
+        relevance: item.relevance ?? "Matches your search criteria",
       }))
       .slice(0, 30);
 
@@ -312,7 +348,7 @@ export default defineEventHandler(async (event) => {
       result_mode: "content" as const,
       content_items: contentItems,
       sources: [],
-      existing_source_count: currentPolicy.sources.length
+      existing_source_count: currentPolicy.sources.length,
     };
   }
 
@@ -323,10 +359,10 @@ export default defineEventHandler(async (event) => {
     .filter((s) => !existingUrls.has(s.url!))
     .map((s) => ({
       url: s.url!,
-      type: s.type === "api" ? "api" as const : "rss" as const,
+      type: s.type === "api" ? ("api" as const) : ("rss" as const),
       label: s.label!,
       weight: Math.min(0.5, Math.max(0.05, s.weight ?? 0.1)),
-      reason: s.reason ?? "Relevant to your goal topics"
+      reason: s.reason ?? "Relevant to your goal topics",
     }));
 
   // Validate each source in parallel
@@ -341,9 +377,9 @@ export default defineEventHandler(async (event) => {
         valid: result.valid,
         feed_title: result.title,
         item_count: result.itemCount,
-        error: result.error
+        error: result.error,
       };
-    })
+    }),
   );
 
   return {
@@ -351,6 +387,6 @@ export default defineEventHandler(async (event) => {
     result_mode: "sources" as const,
     sources: validatedSources,
     content_items: [],
-    existing_source_count: currentPolicy.sources.length
+    existing_source_count: currentPolicy.sources.length,
   };
 });
