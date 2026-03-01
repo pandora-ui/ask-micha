@@ -45,6 +45,7 @@ export default defineEventHandler(async (event) => {
   for (const src of body.sources) {
     if (!src.url || !["rss", "api"].includes(src.type)) continue;
     if (existingUrls.has(src.url)) continue; // skip duplicates
+    existingUrls.add(src.url); // track within this batch too
 
     const id = ensureUniqueId(
       urlToId(src.url, src.type),

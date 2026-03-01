@@ -1,6 +1,31 @@
 import { defaultSourcePolicy } from "@mvp/shared";
 import { getDirectusClient } from "../../utils/directus";
 
+// ─── URL safety check (SSRF prevention) ──────────────────────────────────────
+
+function isUrlSafe(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return false;
+    if (hostname.endsWith(".local") || hostname.endsWith(".internal")) return false;
+    if (hostname.startsWith("169.254.") || hostname === "metadata.google.internal") return false;
+    const parts = hostname.split(".");
+    if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p))) {
+      const a = Number(parts[0]);
+      const b = Number(parts[1]);
+      if (a === 10) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 192 && b === 168) return false;
+      if (a === 0) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 interface DiscoverRequest {
   goal_name?: string;
   focus_topics?: string[];
@@ -116,6 +141,10 @@ async function validateFeedUrl(url: string): Promise<{
   itemCount?: number;
   error?: string;
 }> {
+  if (!isUrlSafe(url)) {
+    return { valid: false, error: "Blocked: private or internal URL" };
+  }
+
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6000);
@@ -124,13 +153,14 @@ async function validateFeedUrl(url: string): Promise<{
       signal: controller.signal,
       headers: { "User-Agent": "Mozilla/5.0 (compatible; RSS-Validator/1.0)" }
     });
-    clearTimeout(timer);
 
     if (!response.ok) {
+      clearTimeout(timer);
       return { valid: false, error: `HTTP ${response.status}` };
     }
 
     const text = await response.text();
+    clearTimeout(timer);
     const isRss = text.includes("<rss") || text.includes("<feed") || text.includes("<rdf:RDF");
 
     if (!isRss) {
@@ -185,10 +215,10 @@ export default defineEventHandler(async (event) => {
     existingUrls
   });
 
-  // Filter out any sources whose URL already exists
-  const fresh = suggested.filter((s) => !existingUrls.has(s.url));
+  // Filter out any sources whose URL already exists or that target internal URLs
+  const fresh = suggested.filter((s) => !existingUrls.has(s.url) && isUrlSafe(s.url));
 
-  // Validate each suggested source in parallel (with concurrency limit)
+  // Validate each suggested source in parallel
   const validated: ValidatedSource[] = await Promise.all(
     fresh.map(async (source): Promise<ValidatedSource> => {
       if (source.type === "api") {
