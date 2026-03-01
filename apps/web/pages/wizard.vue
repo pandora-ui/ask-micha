@@ -2,6 +2,19 @@
 import type { GoalSpec } from "@mvp/schemas";
 // Ref is auto-imported by Nuxt/Vue, no explicit import needed
 
+// ─── Types ───────────────────────────────────────────────────────────────────
+type SuggestedSource = {
+  url: string;
+  type: "rss" | "api";
+  label: string;
+  weight: number;
+  reason: string;
+  valid: boolean;
+  feed_title?: string | null;
+  item_count?: number;
+  error?: string;
+};
+
 // ─── Dark mode ────────────────────────────────────────────────────────────────
 const isDark = ref(false);
 onMounted(() => {
@@ -188,6 +201,106 @@ function applyTemplate(key: string) {
   form.max_items = v.max_items;
 }
 
+// ─── Source Discovery ────────────────────────────────────────────────────────
+const showDiscovery      = ref(false);
+const isDiscovering      = ref(false);
+const discoveryError     = ref("");
+const discoveredSources  = ref<SuggestedSource[]>([]);
+const selectedSources    = ref<Set<number>>(new Set());
+const isAddingSources    = ref(false);
+const addSourcesMsg      = ref("");
+const savedGoalName      = ref("");
+
+function toggleSourceSelection(idx: number) {
+  const next = new Set(selectedSources.value);
+  if (next.has(idx)) next.delete(idx);
+  else next.add(idx);
+  selectedSources.value = next;
+}
+
+function selectAllValid() {
+  const next = new Set<number>();
+  discoveredSources.value.forEach((s, i) => { if (s.valid) next.add(i); });
+  selectedSources.value = next;
+}
+
+function deselectAll() {
+  selectedSources.value = new Set();
+}
+
+async function discoverSources() {
+  isDiscovering.value = true;
+  discoveryError.value = "";
+  discoveredSources.value = [];
+  selectedSources.value = new Set();
+  addSourcesMsg.value = "";
+
+  try {
+    const res = await $fetch<{ suggestions: SuggestedSource[]; existing_count: number }>("/api/sources/discover", {
+      method: "POST",
+      body: {
+        goal_name: form.name.trim(),
+        focus_topics: form.focus_topics,
+        must_include_keywords: form.must_include_keywords,
+        target_audience: form.target_audience
+      }
+    });
+    discoveredSources.value = res.suggestions;
+    // Auto-select all valid sources
+    const validIdxs = new Set<number>();
+    res.suggestions.forEach((s, i) => { if (s.valid) validIdxs.add(i); });
+    selectedSources.value = validIdxs;
+  } catch (err) {
+    discoveryError.value = err instanceof Error ? err.message : "Discovery failed";
+  } finally {
+    isDiscovering.value = false;
+  }
+}
+
+async function addSelectedSources() {
+  const toAdd = [...selectedSources.value]
+    .map((i) => discoveredSources.value[i])
+    .filter((s) => s && s.valid);
+
+  if (toAdd.length === 0) return;
+  isAddingSources.value = true;
+  addSourcesMsg.value = "";
+
+  try {
+    const res = await $fetch<{ added: number }>("/api/sources/bulk-add", {
+      method: "POST",
+      body: {
+        sources: toAdd.map((s) => ({
+          url: s.url,
+          type: s.type,
+          label: s.label,
+          weight: s.weight
+        }))
+      }
+    });
+    addSourcesMsg.value = `Added ${res.added} source${res.added !== 1 ? "s" : ""} to your feed policy.`;
+    selectedSources.value = new Set();
+  } catch (err) {
+    addSourcesMsg.value = err instanceof Error ? err.message : "Failed to add sources";
+  } finally {
+    isAddingSources.value = false;
+  }
+}
+
+function skipDiscovery() {
+  showDiscovery.value = false;
+  router.push(`/?goal=${encodeURIComponent(savedGoalName.value)}`);
+}
+
+function finishWithSources() {
+  showDiscovery.value = false;
+  router.push(`/?goal=${encodeURIComponent(savedGoalName.value)}`);
+}
+
+const selectedValidCount = computed(() => {
+  return [...selectedSources.value].filter((i) => discoveredSources.value[i]?.valid).length;
+});
+
 // ─── Save ─────────────────────────────────────────────────────────────────────
 const isSaving  = ref(false);
 const saveError = ref("");
@@ -205,7 +318,11 @@ async function save() {
       method: "POST",
       body: { ...form, name: form.name.trim() }
     });
-    await router.push(`/?goal=${encodeURIComponent(res.goalSpec.name)}`);
+    savedGoalName.value = res.goalSpec.name;
+
+    // After saving, show the source discovery panel and auto-trigger discovery
+    showDiscovery.value = true;
+    discoverSources();
   } catch (err) {
     saveError.value = err instanceof Error ? err.message : "Save failed";
   } finally {
@@ -248,6 +365,147 @@ const activeTemplate = ref<string | null>(null);
     </header>
 
     <div class="max-w-2xl mx-auto px-4 py-8 space-y-5">
+
+      <!-- ══ Source Discovery Panel (shown after save) ═════════════════════ -->
+      <template v-if="showDiscovery">
+        <div>
+          <h1 class="text-xl font-bold text-slate-900 dark:text-slate-100">Source Discovery</h1>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            Goal "{{ savedGoalName }}" saved. Finding the best sources for your topics...
+          </p>
+        </div>
+
+        <div class="rounded-xl border border-blue-200 dark:border-blue-800/50 bg-blue-50/30 dark:bg-blue-900/10 overflow-hidden">
+
+          <!-- Loading state -->
+          <div v-if="isDiscovering" class="px-4 py-10 text-center">
+            <div class="inline-flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
+              <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+              </svg>
+              Discovering relevant sources with AI...
+            </div>
+            <p class="mt-2 text-xs text-slate-400 dark:text-slate-500">This may take a few seconds while we find and validate feeds.</p>
+          </div>
+
+          <!-- Error state -->
+          <div v-else-if="discoveryError" class="px-4 py-6 text-center space-y-3">
+            <p class="text-sm text-red-500">{{ discoveryError }}</p>
+            <div class="flex items-center justify-center gap-2">
+              <button @click="discoverSources()" class="h-8 px-4 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+                Retry
+              </button>
+              <button @click="skipDiscovery()" class="h-8 px-4 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors">
+                Skip
+              </button>
+            </div>
+          </div>
+
+          <!-- Results -->
+          <template v-else-if="discoveredSources.length > 0">
+            <div class="px-4 py-3 border-b border-blue-100 dark:border-blue-800/30 flex items-center justify-between">
+              <p class="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+                {{ discoveredSources.filter(s => s.valid).length }} valid sources found
+              </p>
+              <div class="flex items-center gap-2">
+                <button @click="selectAllValid()" class="text-[11px] text-blue-600 dark:text-blue-400 hover:underline">Select all</button>
+                <span class="text-slate-300 dark:text-slate-600">|</span>
+                <button @click="deselectAll()" class="text-[11px] text-slate-400 hover:underline">Deselect</button>
+              </div>
+            </div>
+
+            <div class="divide-y divide-blue-50 dark:divide-blue-900/20">
+              <div
+                v-for="(source, idx) in discoveredSources"
+                :key="source.url"
+                class="px-4 py-3 flex items-start gap-3 transition-colors"
+                :class="source.valid ? 'hover:bg-blue-50/50 dark:hover:bg-blue-900/20' : 'opacity-50'"
+              >
+                <!-- Checkbox -->
+                <div class="pt-0.5">
+                  <button
+                    class="size-5 rounded border-2 grid place-items-center transition-colors text-[10px] font-bold"
+                    :class="selectedSources.has(idx)
+                      ? 'bg-blue-600 border-blue-600 text-white'
+                      : source.valid
+                        ? 'border-slate-300 dark:border-slate-600 hover:border-blue-400'
+                        : 'border-slate-200 dark:border-slate-700 cursor-not-allowed'"
+                    :disabled="!source.valid"
+                    @click="toggleSourceSelection(idx)"
+                  >
+                    <span v-if="selectedSources.has(idx)">&#10003;</span>
+                  </button>
+                </div>
+
+                <!-- Content -->
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <p class="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{{ source.feed_title || source.label }}</p>
+                    <span
+                      class="text-[9px] font-medium px-1.5 py-0.5 rounded"
+                      :class="source.valid
+                        ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400'
+                        : 'bg-red-50 text-red-500 dark:bg-red-900/20 dark:text-red-400'"
+                    >{{ source.valid ? 'Valid' : source.error || 'Invalid' }}</span>
+                    <span v-if="source.item_count" class="text-[9px] text-slate-400">{{ source.item_count }} items</span>
+                  </div>
+                  <p class="text-[11px] font-mono text-slate-400 dark:text-slate-500 truncate mt-0.5">{{ source.url }}</p>
+                  <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">{{ source.reason }}</p>
+                  <div class="flex items-center gap-3 mt-1">
+                    <span class="text-[10px] text-slate-400">Weight: {{ source.weight.toFixed(2) }}</span>
+                    <span
+                      class="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                      :class="source.type === 'api'
+                        ? 'bg-violet-50 text-violet-600 dark:bg-violet-900/20 dark:text-violet-400'
+                        : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'"
+                    >{{ source.type.toUpperCase() }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Success message -->
+            <div v-if="addSourcesMsg" class="px-4 py-2 text-center">
+              <p class="text-xs" :class="addSourcesMsg.startsWith('Added') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'">{{ addSourcesMsg }}</p>
+            </div>
+
+            <!-- Actions -->
+            <div class="px-4 py-3 border-t border-blue-100 dark:border-blue-800/30 flex items-center justify-between bg-blue-50/30 dark:bg-blue-900/5">
+              <button
+                @click="skipDiscovery()"
+                class="h-8 px-4 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+              >{{ addSourcesMsg ? 'Go to Dashboard' : 'Skip' }}</button>
+              <div class="flex items-center gap-2">
+                <button
+                  v-if="addSourcesMsg"
+                  @click="finishWithSources()"
+                  class="h-8 px-5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
+                >Done</button>
+                <button
+                  v-else
+                  @click="addSelectedSources()"
+                  :disabled="isAddingSources || selectedValidCount === 0"
+                  class="h-8 px-5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold transition-colors"
+                >{{ isAddingSources ? 'Adding...' : `Add ${selectedValidCount} Source${selectedValidCount !== 1 ? 's' : ''}` }}</button>
+              </div>
+            </div>
+          </template>
+
+          <!-- No results -->
+          <div v-else class="px-4 py-8 text-center space-y-3">
+            <p class="text-sm text-slate-500 dark:text-slate-400">No new sources found for this goal.</p>
+            <p class="text-[11px] text-slate-400 dark:text-slate-500">Your existing sources may already cover these topics, or try adding more specific focus keywords.</p>
+            <button
+              @click="skipDiscovery()"
+              class="h-8 px-5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
+            >Go to Dashboard</button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ══ Normal wizard form (hidden during discovery) ═════════════════ -->
+      <template v-else>
 
       <!-- ══ Page heading ════════════════════════════════════════════════════ -->
       <div>
@@ -419,10 +677,11 @@ const activeTemplate = ref<string | null>(null);
       <!-- ══ Tip ═════════════════════════════════════════════════════════════ -->
       <div class="rounded-lg border border-slate-100 dark:border-slate-800 px-4 py-3 text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed">
         <strong class="text-slate-500 dark:text-slate-400">Tip:</strong>
-        Leave all keyword fields empty for a broad signal watch — the system will return the highest-scoring items from your active sources regardless of topic.
-        Each save creates a new versioned record, so you can always see what changed over time.
+        After saving, the system will automatically discover and suggest relevant RSS feeds for your goal topics.
+        You can review and add them with one click — or skip and manage sources manually.
       </div>
 
+      </template>
     </div>
   </div>
 </template>
