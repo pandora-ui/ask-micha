@@ -1,0 +1,74 @@
+{
+  "title": "Discovery Wizard",
+  "steps": [
+    {
+      "id": "goal_name",
+      "title": "Goal Name",
+      "description": "Give your intelligence watch a name.",
+      "type": "text",
+      "required": true,
+      "default": "",
+      "placeholder": "e.g. Climate Tech Watch"
+    },
+    {
+      "id": "focus_topics",
+      "title": "Focus Topics",
+      "description": "Comma-separated topics to prioritize. Leave empty to watch everything.",
+      "type": "tags",
+      "required": false,
+      "default": "",
+      "placeholder": "e.g. climate, renewable energy, solar"
+    },
+    {
+      "id": "excluded_topics",
+      "title": "Excluded Topics",
+      "description": "Comma-separated topics to ignore.",
+      "type": "tags",
+      "required": false,
+      "default": "",
+      "placeholder": "e.g. celebrity, sports"
+    },
+    {
+      "id": "target_audience",
+      "title": "Audience",
+      "description": "Who reads this output?",
+      "type": "select",
+      "required": true,
+      "default": "General",
+      "options": [
+        "General",
+        "Executive team",
+        "Product leadership",
+        "Engineering management",
+        "Marketing leadership",
+        "Research team"
+      ],
+      "placeholder": "General"
+    },
+    {
+      "id": "must_include_keywords",
+      "title": "Required Keywords",
+      "description": "Items should include these keywords when possible. Leave empty for no keyword filter.",
+      "type": "tags",
+      "required": false,
+      "default": "",
+      "placeholder": "e.g. breakthrough, launch, funding"
+    },
+    {
+      "id": "lookback_days",
+      "title": "Lookback Days",
+      "description": "How many days of history should be scanned?",
+      "type": "number",
+      "required": true,
+      "default": 7
+    },
+    {
+      "id": "max_items",
+      "title": "Max Items",
+      "description": "How many ranked items should be returned?",
+      "type": "number",
+      "required": true,
+      "default": 20
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "micha-mvp",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.5.2",
+  "scripts": {
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "directus:wait": "tsx ./scripts/wait-for-directus.ts",
+    "directus:provision": "tsx ./scripts/directus-provision.ts",
+    "seed": "tsx ./scripts/seed.ts",
+    "setup": "pnpm docker:up && pnpm directus:wait && pnpm directus:provision && pnpm seed",
+    "dev": "pnpm -r --parallel dev",
+    "release:notes": "./scripts/release-note.sh --count 20 --output RELEASE_NOTES.md",
+    "deploy:notes": "pnpm release:notes",
+    "release:commit": "./scripts/stage-commit-release.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "dotenv": "^16.4.7",
+    "dotenv-cli": "^8.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.8"
+  }
+}

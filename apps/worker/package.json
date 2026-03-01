@@ -1,0 +1,28 @@
+{
+  "name": "@mvp/worker",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "dev": "tsx src/cli.ts schedule",
+    "pilot": "tsx src/cli.ts pilot",
+    "manual": "tsx src/cli.ts manual",
+    "schedule": "tsx src/cli.ts schedule",
+    "bootstrap:directus": "tsx src/bootstrap-directus.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mvp/schemas": "workspace:*",
+    "@mvp/shared": "workspace:*",
+    "dotenv": "^16.4.7",
+    "node-cron": "^3.0.3",
+    "openai": "^4.81.0",
+    "rss-parser": "^3.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.19.2"
+  }
+}
