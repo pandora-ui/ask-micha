@@ -1,4 +1,3 @@
-import { validateSourcePolicy, type SourcePolicy } from "@mvp/schemas";
 import { defaultSourcePolicy } from "@mvp/shared";
 import { getDirectusClient } from "../../utils/directus";
 
@@ -85,7 +84,7 @@ async function callOpenAiForSources(args: {
   };
 
   const raw = data.choices[0]?.message?.content ?? "{}";
-  const parsed = JSON.parse(raw) as {
+  let parsed: {
     sources?: Array<{
       url?: string;
       type?: string;
@@ -94,6 +93,11 @@ async function callOpenAiForSources(args: {
       reason?: string;
     }>;
   };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("OpenAI returned invalid JSON");
+  }
 
   return (parsed.sources ?? [])
     .filter((s) => s.url && s.label)
