@@ -4,11 +4,12 @@ import { getDirectusClient } from "../../utils/directus";
 /**
  * POST /api/goals/ai-setup
  *
- * Takes a plain-text description of what the user wants to monitor,
- * uses OpenAI to generate all goal parameters (name, topics, keywords,
- * exclusions, audience, etc.) AND discover relevant RSS sources in one call.
+ * Takes a plain-text description of what the user wants to find or monitor.
+ * Uses OpenAI to generate goal parameters AND decides the best result mode:
+ *   - "sources": for ongoing monitoring — returns RSS feed URLs to subscribe to
+ *   - "content": for immediate results — returns actual content items directly
  *
- * Returns: { goal: GeneratedGoal, sources: ValidatedSource[] }
+ * Returns: { goal, result_mode, sources?, content_items?, existing_source_count }
  */
 
 interface AiSetupRequest {
@@ -38,6 +39,14 @@ interface ValidatedSource extends SuggestedSource {
   feed_title?: string | null;
   item_count?: number;
   error?: string;
+}
+
+interface ContentItem {
+  title: string;
+  url: string;
+  description: string;
+  source: string;
+  relevance: string;
 }
 
 // ─── URL safety check (SSRF prevention) ──────────────────────────────────────
@@ -154,45 +163,62 @@ export default defineEventHandler(async (event) => {
   const model = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 
   const prompt = [
-    "You are an expert intelligence analyst and RSS feed curator.",
-    "A user wants to set up an automated intelligence watch. They described their goal in plain language.",
-    "Your job is to:",
-    "1. Create a structured goal configuration from their description",
-    "2. Find 5-10 relevant, real RSS feed URLs that would best serve this goal",
+    "You are an expert intelligence analyst and content curator.",
+    "A user described what they want to find or monitor. Your job is to:",
+    "",
+    "1. Decide the best result_mode based on the user's intent:",
+    "   - \"sources\": if the user wants ONGOING MONITORING of a topic (e.g. \"track AI news\", \"monitor competitor launches\", \"follow security advisories\"). Return RSS feed URLs to subscribe to.",
+    "   - \"content\": if the user wants IMMEDIATE RESULTS / SPECIFIC ITEMS (e.g. \"find newest cinema movies\", \"best restaurants in Berlin\", \"top Python libraries for ML\"). Return a curated list of actual content items directly.",
+    "",
+    "2. Create a structured goal configuration from their description",
+    "3. Based on result_mode, either find RSS sources OR return content items",
     "",
     `User's description: "${description}"`,
     existingList,
     "",
-    "Return strict JSON with two keys:",
+    "Return strict JSON with these keys:",
+    "",
+    "\"result_mode\": \"sources\" or \"content\"",
     "",
     "\"goal\": {",
     "  \"name\": \"short descriptive name for the goal (3-50 chars)\",",
     "  \"focus_topics\": [\"array of 3-8 relevant topic keywords, lowercase\"],",
     "  \"excluded_topics\": [\"array of 0-5 topics to exclude, lowercase\"],",
-    "  \"must_include_keywords\": [\"array of 0-5 critical keywords that items should contain, lowercase\"],",
+    "  \"must_include_keywords\": [\"array of 0-5 critical keywords, lowercase\"],",
     "  \"target_audience\": \"one of: General, Executive team, Product leadership, Engineering management, Marketing leadership, Research team\",",
-    "  \"lookback_days\": number (1-60, how many days back to look),",
-    "  \"max_items\": number (5-50, maximum items per run)",
+    "  \"lookback_days\": number (1-60),",
+    "  \"max_items\": number (5-50)",
     "}",
     "",
+    "IF result_mode is \"sources\", also include:",
     "\"sources\": [",
     "  {",
     "    \"url\": \"real publicly accessible RSS/Atom feed URL\",",
     "    \"type\": \"rss\",",
     "    \"label\": \"descriptive label for the source\",",
-    "    \"weight\": number (0.05-0.5, relevance/trust weight),",
+    "    \"weight\": number (0.05-0.5),",
     "    \"reason\": \"brief reason why this source is relevant\"",
     "  }",
     "]",
     "",
+    "IF result_mode is \"content\", also include:",
+    "\"content_items\": [",
+    "  {",
+    "    \"title\": \"name/title of the item\",",
+    "    \"url\": \"link to the item (real URL)\",",
+    "    \"description\": \"brief description (1-2 sentences)\",",
+    "    \"source\": \"where this info comes from (e.g. IMDb, Wikipedia, official site)\",",
+    "    \"relevance\": \"why this item matches the user's request\"",
+    "  }",
+    "]",
+    "",
     "Requirements:",
-    "- Only suggest REAL, publicly accessible RSS/Atom feed URLs that are likely to work right now",
-    "- Prefer well-known, reliable sources (major news sites, popular blogs, official feeds)",
-    "- Include a diverse mix of sources covering different angles of the topic",
-    "- type must be \"rss\" or \"api\"",
-    "- Do NOT suggest sources already in the existing list above",
+    "- For sources mode: only suggest REAL, publicly accessible RSS/Atom feed URLs. Prefer well-known, reliable sources. type must be \"rss\" or \"api\". Do NOT suggest sources already in the existing list.",
+    "- For content mode: return 5-20 actual, real content items that directly answer the user's query. Use real URLs. Be specific and current.",
     "- Infer the best goal parameters from the user's natural language description",
-    "- If the description is vague, make reasonable assumptions and be broad in topic coverage"
+    "- If the description is vague, make reasonable assumptions",
+    "",
+    "IMPORTANT: Choose \"content\" mode when the user is asking for specific things (items, products, movies, places, tools, etc). Choose \"sources\" mode when they want to track/monitor/follow a topic over time."
   ].join("\n");
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -220,6 +246,7 @@ export default defineEventHandler(async (event) => {
 
   const raw = data.choices[0]?.message?.content ?? "{}";
   let parsed: {
+    result_mode?: string;
     goal?: {
       name?: string;
       focus_topics?: string[];
@@ -236,6 +263,13 @@ export default defineEventHandler(async (event) => {
       weight?: number;
       reason?: string;
     }>;
+    content_items?: Array<{
+      title?: string;
+      url?: string;
+      description?: string;
+      source?: string;
+      relevance?: string;
+    }>;
   };
 
   try {
@@ -243,6 +277,10 @@ export default defineEventHandler(async (event) => {
   } catch {
     throw createError({ statusCode: 502, message: "OpenAI returned invalid JSON" });
   }
+
+  // Determine result mode
+  const resultMode: "sources" | "content" =
+    parsed.result_mode === "content" ? "content" : "sources";
 
   // Build goal from AI response
   const aiGoal = parsed.goal ?? {};
@@ -256,7 +294,29 @@ export default defineEventHandler(async (event) => {
     max_items: Math.min(50, Math.max(5, aiGoal.max_items ?? 20))
   };
 
-  // Process sources
+  if (resultMode === "content") {
+    // Content mode: return curated content items directly
+    const contentItems: ContentItem[] = (parsed.content_items ?? [])
+      .filter((item) => item.title && item.url)
+      .map((item) => ({
+        title: item.title!,
+        url: item.url!,
+        description: item.description ?? "",
+        source: item.source ?? "",
+        relevance: item.relevance ?? "Matches your search criteria"
+      }))
+      .slice(0, 30);
+
+    return {
+      goal,
+      result_mode: "content" as const,
+      content_items: contentItems,
+      sources: [],
+      existing_source_count: currentPolicy.sources.length
+    };
+  }
+
+  // Sources mode: validate RSS feeds
   const suggestedSources: SuggestedSource[] = (parsed.sources ?? [])
     .filter((s) => s.url && s.label)
     .filter((s) => isUrlSafe(s.url!))
@@ -288,7 +348,9 @@ export default defineEventHandler(async (event) => {
 
   return {
     goal,
+    result_mode: "sources" as const,
     sources: validatedSources,
+    content_items: [],
     existing_source_count: currentPolicy.sources.length
   };
 });

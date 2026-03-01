@@ -14,6 +14,14 @@ type SuggestedSource = {
   error?: string;
 };
 
+type ContentItem = {
+  title: string;
+  url: string;
+  description: string;
+  source: string;
+  relevance: string;
+};
+
 // ─── Dark mode ────────────────────────────────────────────────────────────────
 const isDark = ref(false);
 onMounted(() => {
@@ -113,9 +121,11 @@ function populateForm(spec: GoalSpec) {
   form.max_items = spec.max_items ?? 20;
 }
 
-// ─── Source Discovery ────────────────────────────────────────────────────────
+// ─── Source Discovery / Content Items ─────────────────────────────────────────
+const resultMode         = ref<"sources" | "content">("sources");
 const discoveredSources  = ref<SuggestedSource[]>([]);
 const selectedSources    = ref<Set<number>>(new Set());
+const contentItems       = ref<ContentItem[]>([]);
 
 function toggleSourceSelection(idx: number) {
   const next = new Set(selectedSources.value);
@@ -160,7 +170,9 @@ async function generateWithAI() {
         lookback_days: number;
         max_items: number;
       };
+      result_mode: "sources" | "content";
       sources: SuggestedSource[];
+      content_items: ContentItem[];
       existing_source_count: number;
     }>("/api/goals/ai-setup", {
       method: "POST",
@@ -175,10 +187,19 @@ async function generateWithAI() {
     form.lookback_days = res.goal.lookback_days;
     form.max_items = res.goal.max_items;
 
-    discoveredSources.value = res.sources;
-    const validIdxs = new Set<number>();
-    res.sources.forEach((s, i) => { if (s.valid) validIdxs.add(i); });
-    selectedSources.value = validIdxs;
+    resultMode.value = res.result_mode;
+
+    if (res.result_mode === "content") {
+      contentItems.value = res.content_items;
+      discoveredSources.value = [];
+      selectedSources.value = new Set();
+    } else {
+      contentItems.value = [];
+      discoveredSources.value = res.sources;
+      const validIdxs = new Set<number>();
+      res.sources.forEach((s, i) => { if (s.valid) validIdxs.add(i); });
+      selectedSources.value = validIdxs;
+    }
 
     step.value = "review";
   } catch (err) {
@@ -214,22 +235,34 @@ async function save() {
       body: { ...form, name: form.name.trim() }
     });
 
-    const toAdd = [...selectedSources.value]
-      .map((i) => discoveredSources.value[i])
-      .filter((s) => s && s.valid);
-
-    if (toAdd.length > 0) {
-      await $fetch("/api/sources/bulk-add", {
+    if (resultMode.value === "content" && contentItems.value.length > 0) {
+      // Content mode: import items as a completed run
+      await $fetch("/api/runs/import", {
         method: "POST",
         body: {
-          sources: toAdd.map((s) => ({
-            url: s.url,
-            type: s.type,
-            label: s.label,
-            weight: s.weight
-          }))
+          goal_name: res.goalSpec.name,
+          items: contentItems.value
         }
       });
+    } else {
+      // Sources mode: bulk-add selected sources
+      const toAdd = [...selectedSources.value]
+        .map((i) => discoveredSources.value[i])
+        .filter((s) => s && s.valid);
+
+      if (toAdd.length > 0) {
+        await $fetch("/api/sources/bulk-add", {
+          method: "POST",
+          body: {
+            sources: toAdd.map((s) => ({
+              url: s.url,
+              type: s.type,
+              label: s.label,
+              weight: s.weight
+            }))
+          }
+        });
+      }
     }
 
     await router.push(`/?goal=${encodeURIComponent(res.goalSpec.name)}`);
@@ -538,8 +571,39 @@ function applyTemplate(key: string) {
           </div>
         </div>
 
-        <!-- Discovered Sources -->
-        <div v-if="discoveredSources.length > 0" class="rounded-xl border border-blue-200 dark:border-blue-800/50 bg-blue-50/30 dark:bg-blue-900/10 overflow-hidden">
+        <!-- Content Items (content mode) -->
+        <div v-if="resultMode === 'content' && contentItems.length > 0" class="rounded-xl border border-emerald-200 dark:border-emerald-800/50 bg-emerald-50/30 dark:bg-emerald-900/10 overflow-hidden">
+          <div class="px-4 py-3 border-b border-emerald-100 dark:border-emerald-800/30">
+            <p class="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+              {{ contentItems.length }} results found
+            </p>
+            <p class="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+              AI returned direct results for your query. These will be saved as a completed run.
+            </p>
+          </div>
+
+          <div class="divide-y divide-emerald-50 dark:divide-emerald-900/20">
+            <div
+              v-for="item in contentItems"
+              :key="item.url"
+              class="px-4 py-3 hover:bg-emerald-50/50 dark:hover:bg-emerald-900/20 transition-colors"
+            >
+              <div class="flex items-start gap-3">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <a :href="item.url" target="_blank" rel="noopener" class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline truncate">{{ item.title }}</a>
+                    <span class="text-[9px] font-medium px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400 shrink-0">{{ item.source }}</span>
+                  </div>
+                  <p class="text-[11px] text-slate-600 dark:text-slate-300 mt-1">{{ item.description }}</p>
+                  <p class="text-[11px] text-slate-400 dark:text-slate-500 mt-1 italic">{{ item.relevance }}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Discovered Sources (sources mode) -->
+        <div v-if="resultMode === 'sources' && discoveredSources.length > 0" class="rounded-xl border border-blue-200 dark:border-blue-800/50 bg-blue-50/30 dark:bg-blue-900/10 overflow-hidden">
           <div class="px-4 py-3 border-b border-blue-100 dark:border-blue-800/30 flex items-center justify-between">
             <p class="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
               {{ discoveredSources.filter(s => s.valid).length }} sources discovered
@@ -618,7 +682,7 @@ function applyTemplate(key: string) {
                 @click="save"
                 :disabled="isSaving"
                 class="h-8 px-5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold transition-colors"
-              >{{ isSaving ? 'Saving...' : `Save Goal${selectedValidCount > 0 ? ` + ${selectedValidCount} Source${selectedValidCount !== 1 ? 's' : ''}` : ''}` }}</button>
+              >{{ isSaving ? 'Saving...' : resultMode === 'content' ? `Save Goal + ${contentItems.length} Result${contentItems.length !== 1 ? 's' : ''}` : `Save Goal${selectedValidCount > 0 ? ` + ${selectedValidCount} Source${selectedValidCount !== 1 ? 's' : ''}` : ''}` }}</button>
             </div>
           </div>
         </div>
