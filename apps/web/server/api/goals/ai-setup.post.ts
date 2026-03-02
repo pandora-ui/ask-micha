@@ -184,7 +184,7 @@ export default defineEventHandler(async (event) => {
   // Both the system instruction and user input use structured JSON for
   // scalability, verifiability, and consistent parsing.
 
-  const systemPrompt = JSON.stringify({
+  const systemPrompt = "Respond with a single JSON object.\n\n" + JSON.stringify({
     role: "You are an expert intelligence analyst and content curator.",
     task: "Analyze the user's description and generate a complete goal configuration with results.",
     instructions: {
