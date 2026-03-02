@@ -121,12 +121,9 @@ onMounted(() => {
   isDark.value = stored !== null ? stored === "dark" : prefersDark;
   document.documentElement.classList.toggle("dark", isDark.value);
 
-  // Active goal from URL param (after wizard redirect) or localStorage
-  const route = useRoute();
-  const goalParam = route.query.goal as string | undefined;
-  if (goalParam) {
-    activeGoalName.value = goalParam;
-    localStorage.setItem("activeGoalName", goalParam);
+  // Sync activeGoalName with localStorage (URL param already set during setup)
+  if (activeGoalName.value) {
+    localStorage.setItem("activeGoalName", activeGoalName.value);
   } else {
     activeGoalName.value = localStorage.getItem("activeGoalName");
   }
@@ -181,8 +178,10 @@ const computeImpactTag = (title: string): string => {
   return "Signal";
 };
 
-// ─── Active Goal (localStorage-based selection) ────────────────────────────────
-const activeGoalName = ref<string | null>(null);
+// ─── Active Goal (set from URL param BEFORE useFetch so first fetch uses correct goal) ─────
+const route = useRoute();
+const goalFromUrl = route.query.goal as string | undefined;
+const activeGoalName = ref<string | null>(goalFromUrl ?? null);
 
 // ─── Data Fetching ─────────────────────────────────────────────────────────────
 const { data: goalsData, refresh: refreshGoals } = await useFetch<{ goals: GoalEntry[] }>("/api/goals", {
