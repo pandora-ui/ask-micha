@@ -1,17 +1,6 @@
 import { defaultSourcePolicy } from "@mvp/shared";
 import { getDirectusClient } from "../../utils/directus";
 
-/**
- * POST /api/goals/ai-setup
- *
- * Takes a plain-text description of what the user wants to find or monitor.
- * Uses OpenAI to generate goal parameters AND decides the best result mode:
- *   - "sources": for ongoing monitoring — returns RSS feed URLs to subscribe to
- *   - "content": for immediate results — returns actual content items directly
- *
- * Returns: { goal, result_mode, sources?, content_items?, existing_source_count }
- */
-
 interface AiSetupRequest {
   description: string;
 }
@@ -41,52 +30,29 @@ interface ValidatedSource extends SuggestedSource {
   error?: string;
 }
 
-interface ContentItem {
-  title: string;
-  url: string;
-  description: string;
-  source: string;
-  relevance: string;
-}
-
-// ─── URL safety check (SSRF prevention) ──────────────────────────────────────
+const DEFAULT_MODEL = "gpt-4.1-mini";
+const isPatentIntent = (description: string): boolean =>
+  /patent|patente|dpma|epo|espacenet|depatis|wipo|uspto|patentscope/i.test(description);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function isUrlSafe(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
-
-    // Only allow http(s)
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-      return false;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
 
     const hostname = parsed.hostname.toLowerCase();
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return false;
+    if (hostname.endsWith(".local") || hostname.endsWith(".internal")) return false;
+    if (hostname.startsWith("169.254.") || hostname === "metadata.google.internal") return false;
 
-    // Block localhost / loopback
-    if (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1"
-    )
-      return false;
-    if (hostname.endsWith(".local") || hostname.endsWith(".internal"))
-      return false;
-
-    // Block link-local / metadata
-    if (
-      hostname.startsWith("169.254.") ||
-      hostname === "metadata.google.internal"
-    )
-      return false;
-
-    // Block private IP ranges
     const parts = hostname.split(".");
     if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p))) {
       const a = Number(parts[0]);
       const b = Number(parts[1]);
-      if (a === 10) return false; // 10.x.x.x
-      if (a === 172 && b >= 16 && b <= 31) return false; // 172.16-31.x.x
-      if (a === 192 && b === 168) return false; // 192.168.x.x
-      if (a === 0) return false; // 0.x.x.x
+      if (a === 10) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 192 && b === 168) return false;
+      if (a === 0) return false;
     }
 
     return true;
@@ -95,40 +61,41 @@ function isUrlSafe(urlStr: string): boolean {
   }
 }
 
-// ─── Feed validation ─────────────────────────────────────────────────────────
-
-async function validateFeedUrl(url: string): Promise<{
-  valid: boolean;
-  title?: string | null;
-  itemCount?: number;
-  error?: string;
-}> {
+async function validateFeedUrl(url: string): Promise<{ valid: boolean; title?: string | null; itemCount?: number; error?: string }> {
   if (!isUrlSafe(url)) {
     return { valid: false, error: "Blocked: private or internal URL" };
   }
 
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6000);
-
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; RSS-Validator/1.0)" },
-    });
-
-    if (!response.ok) {
+    let text = "";
+    let lastStatus = 0;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; RSS-Validator/1.0)" }
+      });
       clearTimeout(timer);
+
+      lastStatus = response.status;
+      if (response.ok) {
+        text = await response.text();
+        break;
+      }
+
+      if (attempt === 0 && [429, 502, 503, 504].includes(response.status)) {
+        await sleep(500);
+        continue;
+      }
       return { valid: false, error: `HTTP ${response.status}` };
     }
 
-    const text = await response.text();
-    clearTimeout(timer);
+    if (!text) {
+      return { valid: false, error: `HTTP ${lastStatus || 500}` };
+    }
 
-    const isRss =
-      text.includes("<rss") ||
-      text.includes("<feed") ||
-      text.includes("<rdf:RDF");
-
+    const isRss = text.includes("<rss") || text.includes("<feed") || text.includes("<rdf:RDF");
     if (!isRss) {
       return { valid: false, error: "Not an RSS/Atom feed" };
     }
@@ -140,150 +107,257 @@ async function validateFeedUrl(url: string): Promise<{
     return { valid: true, title, itemCount };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Unknown error";
-    if (msg.includes("aborted") || msg.includes("abort")) {
-      return { valid: false, error: "Timed out" };
-    }
-    return { valid: false, error: msg };
+    return { valid: false, error: msg.includes("abort") ? "Timed out" : msg };
   }
 }
 
-// ─── Main handler ────────────────────────────────────────────────────────────
+const looksLikeSupportedApiPayload = (payload: unknown): { ok: boolean; itemCount?: number; error?: string } => {
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, error: "API payload is not JSON object/array" };
+  }
+
+  const asRecord = payload as Record<string, unknown>;
+
+  // Existing connector support (HN style)
+  if (Array.isArray(asRecord.hits)) {
+    return { ok: true, itemCount: asRecord.hits.length };
+  }
+
+  // PatentView style
+  if (Array.isArray(asRecord.patents)) {
+    return { ok: true, itemCount: asRecord.patents.length };
+  }
+
+  // Generic array payload
+  if (Array.isArray(payload)) {
+    return { ok: true, itemCount: payload.length };
+  }
+
+  // Generic wrapped items
+  if (Array.isArray(asRecord.items)) {
+    return { ok: true, itemCount: asRecord.items.length };
+  }
+
+  return { ok: false, error: "Unsupported API JSON structure" };
+};
+
+async function validateApiUrl(url: string): Promise<{ valid: boolean; itemCount?: number; error?: string }> {
+  if (!isUrlSafe(url)) {
+    return { valid: false, error: "Blocked: private or internal URL" };
+  }
+
+  try {
+    let data: unknown = null;
+    let lastStatus = 0;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; API-Validator/1.0)" }
+      });
+      clearTimeout(timer);
+
+      lastStatus = response.status;
+      if (response.ok) {
+        data = (await response.json()) as unknown;
+        break;
+      }
+
+      if (attempt === 0 && [429, 502, 503, 504].includes(response.status)) {
+        await sleep(500);
+        continue;
+      }
+      return { valid: false, error: `HTTP ${response.status}` };
+    }
+
+    if (data === null) {
+      return { valid: false, error: `HTTP ${lastStatus || 500}` };
+    }
+
+    const checked = looksLikeSupportedApiPayload(data);
+    if (!checked.ok) {
+      return { valid: false, error: checked.error };
+    }
+
+    return { valid: true, itemCount: checked.itemCount ?? 0 };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    return { valid: false, error: msg.includes("abort") ? "Timed out" : msg };
+  }
+}
+
+const toGoogleNewsRss = (q: string): string => {
+  const params = new URLSearchParams({
+    q,
+    hl: "en-US",
+    gl: "US",
+    ceid: "US:en"
+  });
+  return `https://news.google.com/rss/search?${params.toString()}`;
+};
+
+const patentFallbackSources = (description: string): SuggestedSource[] => {
+  const words = description
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((w) => !["the", "and", "for", "with", "from", "that", "this", "patent", "patents"].includes(w))
+    .slice(0, 4);
+  const term = words.join(" ") || "technology";
+  return [
+    {
+      url: toGoogleNewsRss(`"${term}" patent (filing OR grant)`),
+      type: "rss",
+      label: "Patent News: Global",
+      weight: 0.3,
+      reason: "Recent patent publications and grant news"
+    },
+    {
+      url: toGoogleNewsRss(`"${term}" patent site:uspto.gov`),
+      type: "rss",
+      label: "Patent News: USPTO",
+      weight: 0.25,
+      reason: "Patent updates linked to USPTO sources"
+    },
+    {
+      url: toGoogleNewsRss(`"${term}" patent site:wipo.int`),
+      type: "rss",
+      label: "Patent News: WIPO",
+      weight: 0.2,
+      reason: "Patent and IP updates from WIPO domain coverage"
+    },
+    {
+      url: toGoogleNewsRss(`"${term}" patent site:epo.org`),
+      type: "rss",
+      label: "Patent News: EPO",
+      weight: 0.15,
+      reason: "European patent updates from EPO domain coverage"
+    },
+    {
+      url: toGoogleNewsRss(`"${term}" patent site:patents.google.com`),
+      type: "rss",
+      label: "Patent News: Google Patents Coverage",
+      weight: 0.1,
+      reason: "Coverage and references that include Google Patents links"
+    }
+  ];
+};
+
+const defaultFallbackSources = (): SuggestedSource[] => [
+  {
+    url: "https://hnrss.org/frontpage",
+    type: "rss",
+    label: "Hacker News",
+    weight: 0.2,
+    reason: "General fallback source with frequent updates"
+  }
+];
+
+const fallbackSourcesForDescription = (description: string): SuggestedSource[] => {
+  if (isPatentIntent(description)) {
+    return patentFallbackSources(description);
+  }
+  return defaultFallbackSources();
+};
 
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig();
   const apiKey = config.openAiApiKey;
 
   if (!apiKey) {
-    throw createError({
-      statusCode: 500,
-      message: "OpenAI API key not configured",
-    });
+    throw createError({ statusCode: 500, message: "OpenAI API key not configured" });
   }
 
   const body = (await readBody(event)) as AiSetupRequest;
   const description = (body.description ?? "").trim();
 
   if (!description || description.length < 5) {
-    throw createError({
-      statusCode: 400,
-      message: "Please provide a description of at least 5 characters",
-    });
+    throw createError({ statusCode: 400, message: "Please provide a description of at least 5 characters" });
   }
 
-  // Get existing source URLs to avoid duplicates
   const directus = getDirectusClient();
   const policyResult = await directus.getLatestSourcePolicyWithVersion();
   const currentPolicy = policyResult?.policy ?? defaultSourcePolicy();
   const existingUrls = new Set(currentPolicy.sources.map((s) => s.url));
 
-  const existingUrlsList = [...existingUrls];
-
-  const model = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
-
-  // ─── JSON-based prompt structure ──────────────────────────────────────────
-  // Both the system instruction and user input use structured JSON for
-  // scalability, verifiability, and consistent parsing.
-
-  const systemPrompt = "Respond with a single JSON object.\n\n" + JSON.stringify({
-    role: "You are an expert intelligence analyst and content curator.",
-    task: "Analyze the user's description and generate a complete goal configuration with results.",
-    instructions: {
-      step_1_decide_mode: {
-        description: "Decide the best result_mode based on the user's intent.",
-        rules: [
-          "Use 'sources' ONLY when the user explicitly wants ONGOING, RECURRING monitoring over time (keywords: 'track', 'monitor', 'follow', 'subscribe', 'watch regularly', 'keep me updated').",
-          "Use 'content' for EVERYTHING ELSE — including searches, lookups, finding items, research, lists, recommendations, discoveries, analyses, comparisons.",
-          "When in doubt, default to 'content'. It is the more useful mode for most queries.",
-          "The user's description determines the mode — not the topic. A patent search, a movie search, a restaurant search, a tool comparison — all use 'content' mode."
-        ]
-      },
-      step_2_generate_goal: {
-        description: "Create a structured goal configuration from the user's description.",
-        fields: {
-          name: "short descriptive name for the goal (3-50 chars), derived from the user's description",
-          focus_topics: "array of 3-8 relevant topic keywords, lowercase",
-          excluded_topics: "array of 0-5 topics to exclude, lowercase",
-          must_include_keywords: "array of 0-5 critical keywords, lowercase",
-          target_audience: "one of: General, Executive team, Product leadership, Engineering management, Marketing leadership, Research team",
-          lookback_days: "number 1-60",
-          max_items: "number 5-50"
-        }
-      },
-      step_3_generate_results: {
-        sources_mode: {
-          description: "Return 5-10 real, publicly accessible RSS/Atom feed URLs.",
-          rules: [
-            "Only suggest real, working RSS/Atom feed URLs",
-            "Prefer well-known, reliable sources with regular updates",
-            "type must be 'rss' or 'api'",
-            "Do NOT suggest URLs from the excluded_urls list"
-          ]
-        },
-        content_mode: {
-          description: "Return 5-20 actual, real content items that DIRECTLY answer the user's query.",
-          rules: [
-            "Items must be specific and relevant to exactly what the user asked for",
-            "Use real, working URLs",
-            "Be current and factual",
-            "Each item should directly match the user's described intent",
-            "Do NOT return generic websites or news pages — return actual results/items the user is looking for"
-          ]
-        }
-      }
-    },
-    output_schema: {
-      result_mode: "'sources' or 'content'",
+  const model = process.env.OPENAI_MODEL ?? DEFAULT_MODEL;
+  const systemPrompt = [
+    "Return strict JSON only.",
+    "Task: derive a run-ready monitoring goal and source plan from user intent.",
+    "You MUST return only sources that can be directly fetched by a backend run.",
+    "Prefer concrete RSS feeds and JSON APIs.",
+    "Do NOT return tutorials, explanation pages, or placeholder links.",
+    "Output schema:",
+    JSON.stringify({
       goal: {
         name: "string",
-        focus_topics: "string[]",
-        excluded_topics: "string[]",
-        must_include_keywords: "string[]",
+        focus_topics: ["string"],
+        excluded_topics: ["string"],
+        must_include_keywords: ["string"],
         target_audience: "string",
-        lookback_days: "number",
-        max_items: "number"
+        lookback_days: 7,
+        max_items: 20
       },
-      sources: "Array<{url, type, label, weight, reason}> — only if result_mode='sources'",
-      content_items: "Array<{title, url, description, source, relevance}> — only if result_mode='content'"
+      sources: [
+        {
+          url: "https://...",
+          type: "rss|api",
+          label: "string",
+          weight: 0.1,
+          reason: "string"
+        }
+      ]
+    })
+  ].join("\n");
+
+  const userPrompt = JSON.stringify({
+    description,
+    excluded_urls: [...existingUrls],
+    constraints: {
+      min_sources: 5,
+      max_sources: 12,
+      allowed_types: ["rss", "api"]
     }
   });
 
-  const userInput = JSON.stringify({
-    user_description: description,
-    excluded_urls: existingUrlsList.length > 0 ? existingUrlsList : undefined
-  });
+  const callModel = async (targetModel: string) => {
+    return fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: targetModel,
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      })
+    });
+  };
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.4,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userInput },
-      ],
-    }),
-  });
+  let response = await callModel(model);
+  if (!response.ok && model !== DEFAULT_MODEL) {
+    response = await callModel(DEFAULT_MODEL);
+  }
 
   if (!response.ok) {
     const errorBody = await response.text();
     throw createError({
       statusCode: 502,
-      message: `OpenAI API error ${response.status}: ${errorBody}`,
+      message: `OpenAI API error ${response.status}: ${errorBody}`
     });
   }
 
-  const data = (await response.json()) as {
-    choices: Array<{ message: { content: string } }>;
-  };
-
+  const data = (await response.json()) as { choices: Array<{ message: { content: string } }> };
   const raw = data.choices[0]?.message?.content ?? "{}";
+
   let parsed: {
-    result_mode?: string;
     goal?: {
       name?: string;
       focus_topics?: string[];
@@ -300,106 +374,95 @@ export default defineEventHandler(async (event) => {
       weight?: number;
       reason?: string;
     }>;
-    content_items?: Array<{
-      title?: string;
-      url?: string;
-      description?: string;
-      source?: string;
-      relevance?: string;
-    }>;
   };
 
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw createError({
-      statusCode: 502,
-      message: "OpenAI returned invalid JSON",
-    });
+    throw createError({ statusCode: 502, message: "OpenAI returned invalid JSON" });
   }
 
-  // Determine result mode
-  const resultMode: "sources" | "content" =
-    parsed.result_mode === "content" ? "content" : "sources";
-
-  // Build goal from AI response
   const aiGoal = parsed.goal ?? {};
   const goal: GeneratedGoal = {
     name: (aiGoal.name ?? "Intelligence Watch").slice(0, 50),
-    focus_topics: (aiGoal.focus_topics ?? [])
-      .map((t) => String(t).toLowerCase().trim())
-      .filter(Boolean)
-      .slice(0, 8),
-    excluded_topics: (aiGoal.excluded_topics ?? [])
-      .map((t) => String(t).toLowerCase().trim())
-      .filter(Boolean)
-      .slice(0, 5),
-    must_include_keywords: (aiGoal.must_include_keywords ?? [])
-      .map((t) => String(t).toLowerCase().trim())
-      .filter(Boolean)
-      .slice(0, 5),
+    focus_topics: (aiGoal.focus_topics ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 8),
+    excluded_topics: (aiGoal.excluded_topics ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 5),
+    must_include_keywords: (aiGoal.must_include_keywords ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 5),
     target_audience: aiGoal.target_audience ?? "General",
     lookback_days: Math.min(60, Math.max(1, aiGoal.lookback_days ?? 7)),
-    max_items: Math.min(50, Math.max(5, aiGoal.max_items ?? 20)),
+    max_items: Math.min(50, Math.max(5, aiGoal.max_items ?? 20))
   };
 
-  if (resultMode === "content") {
-    // Content mode: return curated content items directly
-    const contentItems: ContentItem[] = (parsed.content_items ?? [])
-      .filter((item) => item.title && item.url)
-      .map((item) => ({
-        title: item.title!,
-        url: item.url!,
-        description: item.description ?? "",
-        source: item.source ?? "",
-        relevance: item.relevance ?? "Matches your search criteria",
-      }))
-      .slice(0, 30);
-
-    return {
-      goal,
-      result_mode: "content" as const,
-      content_items: contentItems,
-      sources: [],
-      existing_source_count: currentPolicy.sources.length,
-    };
-  }
-
-  // Sources mode: validate RSS feeds
-  const suggestedSources: SuggestedSource[] = (parsed.sources ?? [])
+  const normalizedSources: SuggestedSource[] = (parsed.sources ?? [])
     .filter((s) => s.url && s.label)
     .filter((s) => isUrlSafe(s.url!))
     .filter((s) => !existingUrls.has(s.url!))
     .map((s) => ({
       url: s.url!,
-      type: s.type === "api" ? ("api" as const) : ("rss" as const),
+      type: s.type === "api" ? "api" : "rss",
       label: s.label!,
       weight: Math.min(0.5, Math.max(0.05, s.weight ?? 0.1)),
-      reason: s.reason ?? "Relevant to your goal topics",
+      reason: s.reason ?? "Relevant to your goal topics"
     }));
 
-  // Validate each source in parallel
-  const validatedSources: ValidatedSource[] = await Promise.all(
-    suggestedSources.map(async (source): Promise<ValidatedSource> => {
+  const validateSources = async (sources: SuggestedSource[]): Promise<ValidatedSource[]> => {
+    return Promise.all(
+      sources.map(async (source): Promise<ValidatedSource> => {
       if (source.type === "api") {
-        return { ...source, valid: true };
+        const result = await validateApiUrl(source.url);
+        return {
+          ...source,
+          valid: result.valid,
+          item_count: result.itemCount,
+          error: result.error
+        };
       }
+
       const result = await validateFeedUrl(source.url);
       return {
         ...source,
         valid: result.valid,
         feed_title: result.title,
         item_count: result.itemCount,
-        error: result.error,
+        error: result.error
       };
-    }),
-  );
+      })
+    );
+  };
+
+  const primaryCandidates = isPatentIntent(description)
+    ? patentFallbackSources(description).filter((source) => !existingUrls.has(source.url))
+    : (normalizedSources.length > 0 ? normalizedSources : fallbackSourcesForDescription(description));
+  let validatedSources = await validateSources(primaryCandidates);
+  let validSources = validatedSources.filter((s) => s.valid);
+  let fallbackUsed = false;
+
+  if (validSources.length === 0) {
+    const fallbackCandidates = fallbackSourcesForDescription(description).filter(
+      (source) => !primaryCandidates.some((existing) => existing.url === source.url)
+    );
+    if (fallbackCandidates.length > 0) {
+      const fallbackValidated = await validateSources(fallbackCandidates);
+      const fallbackValid = fallbackValidated.filter((s) => s.valid);
+      if (fallbackValid.length > 0) {
+        validatedSources = fallbackValidated;
+        validSources = fallbackValid;
+        fallbackUsed = true;
+      }
+    }
+  }
 
   return {
     goal,
     result_mode: "sources" as const,
     sources: validatedSources,
     content_items: [],
-    existing_source_count: currentPolicy.sources.length,
+    auto_fallback_used: fallbackUsed,
+    validation_summary: {
+      requested: primaryCandidates.length,
+      valid: validSources.length,
+      invalid: validatedSources.length - validSources.length
+    },
+    existing_source_count: currentPolicy.sources.length
   };
 });

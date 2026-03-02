@@ -21,10 +21,16 @@ type HighlightItem = {
   url: string;
   score: number;
   impact_tag: string;
+  summary: string;
+  summary_display: string;
   why_it_matters: string;
+  why_it_matters_display: string;
   risks: string;
+  risks_display: string;
   source: string;
 };
+
+type TranslationLanguage = "de" | "en";
 
 type RunHighlights = {
   has_data: boolean;
@@ -35,6 +41,8 @@ type RunHighlights = {
   headline: string;
   key_message: string;
   executive_summary: string;
+  executive_summary_display?: string;
+  selected_language?: TranslationLanguage;
   critical_updates: string[];
   top_highlights: HighlightItem[];
   other_highlights: HighlightItem[];
@@ -117,6 +125,10 @@ async function toggleRun(runKey: string) {
 const isDark = ref(false);
 onMounted(() => {
   const stored = localStorage.getItem("color-mode");
+  const storedLanguage = localStorage.getItem("resultLanguage");
+  if (storedLanguage === "de" || storedLanguage === "en") {
+    selectedLanguage.value = storedLanguage;
+  }
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   isDark.value = stored !== null ? stored === "dark" : prefersDark;
   document.documentElement.classList.toggle("dark", isDark.value);
@@ -180,7 +192,9 @@ const computeImpactTag = (title: string): string => {
 
 // ─── Active Goal (set from URL param BEFORE useFetch so first fetch uses correct goal) ─────
 const route = useRoute();
+const router = useRouter();
 const goalFromUrl = route.query.goal as string | undefined;
+const jobFromUrl = route.query.job as string | undefined;
 const activeGoalName = ref<string | null>(goalFromUrl ?? null);
 
 // ─── Data Fetching ─────────────────────────────────────────────────────────────
@@ -198,8 +212,13 @@ const { data: scheduleData, refresh: refreshSchedule } = await useFetch<Schedule
 const { data: historyData, refresh: refreshHistory, pending: historyPending } = await useFetch<{
   runs: Array<{ run_key: string; mode: string; status: string; generated_at: string | null; top_count: number | null; total_candidates: number | null }>;
 }>("/api/runs/history", { default: () => ({ runs: [] }) });
+const selectedLanguage = ref<TranslationLanguage>("de");
 const { data: highlightsData, refresh: refreshHighlights } = await useFetch<RunHighlights>(
-  () => `/api/runs/highlights${activeGoalName.value ? "?goal=" + encodeURIComponent(activeGoalName.value) : ""}`,
+  () => {
+    const params = new URLSearchParams({ lang: selectedLanguage.value });
+    if (activeGoalName.value) params.set("goal", activeGoalName.value);
+    return `/api/runs/highlights?${params.toString()}`;
+  },
   { key: "highlights", default: () => ({ has_data: false, headline: "", key_message: "", executive_summary: "", critical_updates: [], top_highlights: [], other_highlights: [] }) }
 );
 
@@ -370,7 +389,13 @@ const streamedItems = computed<HighlightItem[]>(() =>
     .map((item) => ({
       rank: item.rank, title: item.title, url: item.url, score: item.score,
       impact_tag: computeImpactTag(item.title),
-      why_it_matters: "AI insights being generated…", risks: "—", source: item.source ?? ""
+      summary: selectedLanguage.value === "de" ? "Zusammenfassung wird erstellt…" : "Summary is being generated…",
+      summary_display: selectedLanguage.value === "de" ? "Zusammenfassung wird erstellt…" : "Summary is being generated…",
+      why_it_matters: "AI insights being generated…",
+      why_it_matters_display: selectedLanguage.value === "de" ? "Analyse wird erstellt…" : "AI insights being generated…",
+      risks: "—",
+      risks_display: selectedLanguage.value === "de" ? "Risiken werden erstellt…" : "—",
+      source: item.source ?? ""
     }))
 );
 const displayedItems = computed<HighlightItem[]>(() =>
@@ -428,6 +453,24 @@ const pollJob = async () => {
   }
 };
 
+const attachToExistingJob = async (jobId: string) => {
+  currentJobId.value = jobId;
+  currentJob.value = null;
+  justCompleted.value = false;
+  logCollapsed.value = false;
+  pollError.value = "";
+  consecutivePollErrors = 0;
+  stopPolling();
+  stopDurationTimer();
+
+  await pollJob();
+  if (currentJob.value?.status === "running") {
+    startDurationTimer();
+    stopPolling();
+    pollTimer = setInterval(pollJob, 900);
+  }
+};
+
 const startRun = async () => {
   if (isRunning.value || startingRun.value) return;
   startingRun.value = true;
@@ -474,11 +517,41 @@ const resetResultsData = async () => {
     const res = await $fetch<{ deleted: Record<string, number> }>("/api/admin/reset-results", {
       method: "POST", body: { confirm: resetConfirm.value }
     });
+
+    // Immediately clear local UI state so no stale result rows remain visible.
+    expandedRuns.value = new Set();
+    loadingRuns.value = new Set();
+    Object.keys(runHighlights).forEach((key) => {
+      delete runHighlights[key];
+    });
+    if (historyData.value) {
+      historyData.value = { runs: [] };
+    }
+    if (goalsData.value) {
+      goalsData.value = { goals: [] };
+    }
+    activeGoalName.value = null;
+    localStorage.removeItem("activeGoalName");
+    if (highlightsData.value) {
+      highlightsData.value = {
+        has_data: false,
+        headline: "",
+        key_message: "",
+        executive_summary: "",
+        executive_summary_display: "",
+        selected_language: selectedLanguage.value,
+        critical_updates: [],
+        top_highlights: [],
+        other_highlights: [],
+        warnings: []
+      };
+    }
+
     currentJob.value = null;
     currentJobId.value = null;
     stopPolling();
     stopDurationTimer();
-    await Promise.all([refreshHistory(), refreshHighlights()]);
+    await Promise.all([refreshGoals(), refreshGoal(), refreshHistory(), refreshHighlights()]);
     resetMessage.value = Object.entries(res.deleted).map(([k, v]) => `${k}: ${v}`).join(", ");
     resetConfirm.value = "";
     showReset.value = false;
@@ -490,6 +563,17 @@ const resetResultsData = async () => {
 };
 
 watch(() => currentJob.value?.logs?.length, () => nextTick(scrollBottom));
+watch(selectedLanguage, (lang) => {
+  localStorage.setItem("resultLanguage", lang);
+  refreshHighlights();
+});
+onMounted(() => {
+  if (!jobFromUrl) return;
+  void attachToExistingJob(jobFromUrl);
+  const nextQuery = { ...route.query };
+  delete nextQuery.job;
+  void router.replace({ query: nextQuery });
+});
 onBeforeUnmount(() => { stopPolling(); stopDurationTimer(); });
 </script>
 
@@ -779,6 +863,17 @@ onBeforeUnmount(() => { stopPolling(); stopDurationTimer(); });
 
           <!-- Results limit -->
           <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-slate-400 dark:text-slate-500 whitespace-nowrap">Language</span>
+            <select
+              v-model="selectedLanguage"
+              class="h-7 px-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-medium text-slate-600 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-400 cursor-pointer"
+            >
+              <option value="de">Deutsch</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+
+          <div class="flex items-center gap-1.5">
             <span class="text-[11px] text-slate-400 dark:text-slate-500 whitespace-nowrap">Show</span>
             <select
               v-model="displayLimit"
@@ -933,7 +1028,7 @@ onBeforeUnmount(() => { stopPolling(); stopDurationTimer(); });
         <div class="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-100 dark:divide-slate-800 border-b border-slate-100 dark:border-slate-800 text-sm">
           <div class="px-4 py-3">
             <p class="text-[10px] font-medium text-slate-400 uppercase tracking-wider mb-2">Summary</p>
-            <p class="text-slate-600 dark:text-slate-400 leading-relaxed text-xs">{{ highlightsData?.executive_summary || '—' }}</p>
+            <p class="text-slate-600 dark:text-slate-400 leading-relaxed text-xs">{{ highlightsData?.executive_summary_display || highlightsData?.executive_summary || '—' }}</p>
           </div>
           <div class="px-4 py-3">
             <p class="text-[10px] font-medium text-slate-400 uppercase tracking-wider mb-2">Key Updates</p>
@@ -977,8 +1072,9 @@ onBeforeUnmount(() => { stopPolling(); stopDurationTimer(); });
               </div>
               <p class="text-sm font-medium text-slate-900 dark:text-slate-100 leading-snug mb-2">{{ item.title }}</p>
               <div class="space-y-0.5">
-                <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed"><span class="text-slate-400 dark:text-slate-500">Why · </span>{{ item.why_it_matters }}</p>
-                <p class="text-xs text-slate-400 dark:text-slate-500 leading-relaxed"><span class="text-slate-300 dark:text-slate-600">Risk · </span>{{ item.risks }}</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed"><span class="text-slate-400 dark:text-slate-500">Summary · </span>{{ item.summary_display || item.summary || '—' }}</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed"><span class="text-slate-400 dark:text-slate-500">Why · </span>{{ item.why_it_matters_display || item.why_it_matters }}</p>
+                <p class="text-xs text-slate-400 dark:text-slate-500 leading-relaxed"><span class="text-slate-300 dark:text-slate-600">Risk · </span>{{ item.risks_display || item.risks }}</p>
               </div>
             </div>
             <a :href="item.url" target="_blank" rel="noopener noreferrer" class="flex-shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:border-blue-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors mt-0.5 whitespace-nowrap">
@@ -1009,8 +1105,9 @@ onBeforeUnmount(() => { stopPolling(); stopDurationTimer(); });
               </div>
               <p class="text-sm font-medium text-slate-900 dark:text-slate-100 leading-snug mb-2">{{ item.title }}</p>
               <div class="space-y-0.5">
-                <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed"><span class="text-slate-400 dark:text-slate-500">Why · </span>{{ item.why_it_matters }}</p>
-                <p class="text-xs text-slate-400 dark:text-slate-500 leading-relaxed"><span class="text-slate-300 dark:text-slate-600">Risk · </span>{{ item.risks }}</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed"><span class="text-slate-400 dark:text-slate-500">Summary · </span>{{ item.summary_display || item.summary || '—' }}</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed"><span class="text-slate-400 dark:text-slate-500">Why · </span>{{ item.why_it_matters_display || item.why_it_matters }}</p>
+                <p class="text-xs text-slate-400 dark:text-slate-500 leading-relaxed"><span class="text-slate-300 dark:text-slate-600">Risk · </span>{{ item.risks_display || item.risks }}</p>
               </div>
             </div>
             <a :href="item.url" target="_blank" rel="noopener noreferrer" class="flex-shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:border-blue-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors mt-0.5 whitespace-nowrap">
@@ -1164,7 +1261,7 @@ pnpm setup</pre>
               <span class="text-[10px] font-medium text-red-400 uppercase tracking-wider">Danger Zone</span>
               <span class="text-slate-300 dark:text-slate-600">{{ showReset ? '▲' : '▼' }}</span>
             </button>
-            <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">Delete all result data (<code class="font-mono text-[11px] bg-slate-100 dark:bg-slate-800 px-1 rounded">ai_runs, ai_run_items, ai_feedback, ai_discovery_answers, ai_sources</code>). Configuration is preserved.</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">Delete all result data and saved goals (<code class="font-mono text-[11px] bg-slate-100 dark:bg-slate-800 px-1 rounded">ai_runs, ai_run_items, ai_feedback, ai_discovery_answers, ai_sources, ai_goal_specs</code>).</p>
             <Transition
               enter-active-class="transition-all duration-200 ease-out"
               enter-from-class="opacity-0 -translate-y-1"

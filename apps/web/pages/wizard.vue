@@ -187,19 +187,13 @@ async function generateWithAI() {
     form.lookback_days = res.goal.lookback_days;
     form.max_items = res.goal.max_items;
 
-    resultMode.value = res.result_mode;
-
-    if (res.result_mode === "content") {
-      contentItems.value = res.content_items;
-      discoveredSources.value = [];
-      selectedSources.value = new Set();
-    } else {
-      contentItems.value = [];
-      discoveredSources.value = res.sources;
-      const validIdxs = new Set<number>();
-      res.sources.forEach((s, i) => { if (s.valid) validIdxs.add(i); });
-      selectedSources.value = validIdxs;
-    }
+    // AI setup now always returns run-ready sources (no direct content import).
+    resultMode.value = "sources";
+    contentItems.value = [];
+    discoveredSources.value = res.sources;
+    const validIdxs = new Set<number>();
+    res.sources.forEach((s, i) => { if (s.valid) validIdxs.add(i); });
+    selectedSources.value = validIdxs;
 
     step.value = "review";
   } catch (err) {
@@ -235,37 +229,41 @@ async function save() {
       body: { ...form, name: form.name.trim() }
     });
 
-    if (resultMode.value === "content" && contentItems.value.length > 0) {
-      // Content mode: import items as a completed run
-      await $fetch("/api/runs/import", {
-        method: "POST",
-        body: {
-          goal_name: res.goalSpec.name,
-          items: contentItems.value
-        }
-      });
-    } else {
-      // Sources mode: bulk-add selected sources
-      const toAdd = [...selectedSources.value]
-        .map((i) => discoveredSources.value[i])
-        .filter((s) => s && s.valid);
+    // Sources mode: bulk-add selected sources
+    const toAdd = [...selectedSources.value]
+      .map((i) => discoveredSources.value[i])
+      .filter((s) => s && s.valid);
 
-      if (toAdd.length > 0) {
-        await $fetch("/api/sources/bulk-add", {
-          method: "POST",
-          body: {
-            sources: toAdd.map((s) => ({
-              url: s.url,
-              type: s.type,
-              label: s.label,
-              weight: s.weight
-            }))
-          }
-        });
-      }
+    if (toAdd.length === 0) {
+      saveError.value = "No validated sources selected. Please select at least one valid source.";
+      return;
     }
 
-    await router.push(`/?goal=${encodeURIComponent(res.goalSpec.name)}`);
+    if (toAdd.length > 0) {
+      await $fetch("/api/sources/bulk-add", {
+        method: "POST",
+        body: {
+          sources: toAdd.map((s) => ({
+            url: s.url,
+            type: s.type,
+            label: s.label,
+            weight: s.weight
+          }))
+        }
+      });
+    }
+
+    const started = await $fetch<{ id: string }>("/api/runs/start", {
+      method: "POST",
+      body: {
+        mode: "manual",
+        verbose: true,
+        maxItems: form.max_items,
+        goalName: res.goalSpec.name
+      }
+    });
+
+    await router.push(`/?goal=${encodeURIComponent(res.goalSpec.name)}&job=${encodeURIComponent(started.id)}`);
   } catch (err) {
     saveError.value = err instanceof Error ? err.message : "Save failed";
   } finally {
@@ -638,7 +636,14 @@ function applyTemplate(key: string) {
               </div>
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
-                  <p class="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{{ source.feed_title || source.label }}</p>
+                  <a
+                    :href="source.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline truncate"
+                  >
+                    {{ source.feed_title || source.label }}
+                  </a>
                   <span
                     class="text-[9px] font-medium px-1.5 py-0.5 rounded"
                     :class="source.valid
@@ -647,7 +652,14 @@ function applyTemplate(key: string) {
                   >{{ source.valid ? 'Valid' : source.error || 'Invalid' }}</span>
                   <span v-if="source.item_count" class="text-[9px] text-slate-400">{{ source.item_count }} items</span>
                 </div>
-                <p class="text-[11px] font-mono text-slate-400 dark:text-slate-500 truncate mt-0.5">{{ source.url }}</p>
+                <a
+                  :href="source.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="block text-[11px] font-mono text-slate-400 dark:text-slate-500 truncate mt-0.5 hover:text-blue-500 dark:hover:text-blue-400"
+                >
+                  {{ source.url }}
+                </a>
                 <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">{{ source.reason }}</p>
                 <div class="flex items-center gap-3 mt-1">
                   <span class="text-[10px] text-slate-400">Weight: {{ source.weight.toFixed(2) }}</span>
@@ -682,7 +694,7 @@ function applyTemplate(key: string) {
                 @click="save"
                 :disabled="isSaving"
                 class="h-8 px-5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold transition-colors"
-              >{{ isSaving ? 'Saving...' : resultMode === 'content' ? `Save Goal + ${contentItems.length} Result${contentItems.length !== 1 ? 's' : ''}` : `Save Goal${selectedValidCount > 0 ? ` + ${selectedValidCount} Source${selectedValidCount !== 1 ? 's' : ''}` : ''}` }}</button>
+              >{{ isSaving ? 'Saving...' : `Save Goal${selectedValidCount > 0 ? ` + ${selectedValidCount} Source${selectedValidCount !== 1 ? 's' : ''}` : ''}` }}</button>
             </div>
           </div>
         </div>

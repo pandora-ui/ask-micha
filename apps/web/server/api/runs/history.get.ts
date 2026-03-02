@@ -11,7 +11,8 @@ interface RunRecord {
   };
 }
 
-export default defineEventHandler(async () => {
+export default defineEventHandler(async (event) => {
+  setHeader(event, "Cache-Control", "no-store, no-cache, must-revalidate");
   const directus = getDirectusClient();
 
   try {

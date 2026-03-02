@@ -5,7 +5,8 @@ const TARGET_COLLECTIONS = [
   "ai_run_items",
   "ai_feedback",
   "ai_discovery_answers",
-  "ai_sources"
+  "ai_sources",
+  "ai_goal_specs"
 ] as const;
 
 const CONFIRM_TEXT = "RESET RESULTS";
@@ -50,6 +51,6 @@ export default defineEventHandler(async (event) => {
   return {
     ok: true,
     deleted,
-    note: "Result collections were reset. Configuration collections were kept."
+    note: "Result collections and saved goals were reset."
   };
 });
