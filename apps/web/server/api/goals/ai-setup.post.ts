@@ -156,70 +156,81 @@ export default defineEventHandler(async (event) => {
   const currentPolicy = policyResult?.policy ?? defaultSourcePolicy();
   const existingUrls = new Set(currentPolicy.sources.map((s) => s.url));
 
-  const existingList = existingUrls.size > 0
-    ? `\nAlready configured sources (do NOT suggest these URLs): ${[...existingUrls].join(", ")}`
-    : "";
+  const existingUrlsList = [...existingUrls];
 
   const model = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 
-  const prompt = [
-    "You are an expert intelligence analyst and content curator.",
-    "A user described what they want to find or monitor. Your job is to:",
-    "",
-    "1. Decide the best result_mode based on the user's intent:",
-    "   - \"sources\": if the user wants ONGOING MONITORING of a topic (e.g. \"track AI news\", \"monitor competitor launches\", \"follow security advisories\"). Return RSS feed URLs to subscribe to.",
-    "   - \"content\": if the user wants IMMEDIATE RESULTS / SPECIFIC ITEMS (e.g. \"find newest cinema movies\", \"best restaurants in Berlin\", \"top Python libraries for ML\"). Return a curated list of actual content items directly.",
-    "",
-    "2. Create a structured goal configuration from their description",
-    "3. Based on result_mode, either find RSS sources OR return content items",
-    "",
-    `User's description: "${description}"`,
-    existingList,
-    "",
-    "Return strict JSON with these keys:",
-    "",
-    "\"result_mode\": \"sources\" or \"content\"",
-    "",
-    "\"goal\": {",
-    "  \"name\": \"short descriptive name for the goal (3-50 chars)\",",
-    "  \"focus_topics\": [\"array of 3-8 relevant topic keywords, lowercase\"],",
-    "  \"excluded_topics\": [\"array of 0-5 topics to exclude, lowercase\"],",
-    "  \"must_include_keywords\": [\"array of 0-5 critical keywords, lowercase\"],",
-    "  \"target_audience\": \"one of: General, Executive team, Product leadership, Engineering management, Marketing leadership, Research team\",",
-    "  \"lookback_days\": number (1-60),",
-    "  \"max_items\": number (5-50)",
-    "}",
-    "",
-    "IF result_mode is \"sources\", also include:",
-    "\"sources\": [",
-    "  {",
-    "    \"url\": \"real publicly accessible RSS/Atom feed URL\",",
-    "    \"type\": \"rss\",",
-    "    \"label\": \"descriptive label for the source\",",
-    "    \"weight\": number (0.05-0.5),",
-    "    \"reason\": \"brief reason why this source is relevant\"",
-    "  }",
-    "]",
-    "",
-    "IF result_mode is \"content\", also include:",
-    "\"content_items\": [",
-    "  {",
-    "    \"title\": \"name/title of the item\",",
-    "    \"url\": \"link to the item (real URL)\",",
-    "    \"description\": \"brief description (1-2 sentences)\",",
-    "    \"source\": \"where this info comes from (e.g. IMDb, Wikipedia, official site)\",",
-    "    \"relevance\": \"why this item matches the user's request\"",
-    "  }",
-    "]",
-    "",
-    "Requirements:",
-    "- For sources mode: only suggest REAL, publicly accessible RSS/Atom feed URLs. Prefer well-known, reliable sources. type must be \"rss\" or \"api\". Do NOT suggest sources already in the existing list.",
-    "- For content mode: return 5-20 actual, real content items that directly answer the user's query. Use real URLs. Be specific and current.",
-    "- Infer the best goal parameters from the user's natural language description",
-    "- If the description is vague, make reasonable assumptions",
-    "",
-    "IMPORTANT: Choose \"content\" mode when the user is asking for specific things (items, products, movies, places, tools, etc). Choose \"sources\" mode when they want to track/monitor/follow a topic over time."
-  ].join("\n");
+  // ─── JSON-based prompt structure ──────────────────────────────────────────
+  // Both the system instruction and user input use structured JSON for
+  // scalability, verifiability, and consistent parsing.
+
+  const systemPrompt = JSON.stringify({
+    role: "You are an expert intelligence analyst and content curator.",
+    task: "Analyze the user's description and generate a complete goal configuration with results.",
+    instructions: {
+      step_1_decide_mode: {
+        description: "Decide the best result_mode based on the user's intent.",
+        rules: [
+          "Use 'sources' ONLY when the user explicitly wants ONGOING, RECURRING monitoring over time (keywords: 'track', 'monitor', 'follow', 'subscribe', 'watch regularly', 'keep me updated').",
+          "Use 'content' for EVERYTHING ELSE — including searches, lookups, finding items, research, lists, recommendations, discoveries, analyses, comparisons.",
+          "When in doubt, default to 'content'. It is the more useful mode for most queries.",
+          "The user's description determines the mode — not the topic. A patent search, a movie search, a restaurant search, a tool comparison — all use 'content' mode."
+        ]
+      },
+      step_2_generate_goal: {
+        description: "Create a structured goal configuration from the user's description.",
+        fields: {
+          name: "short descriptive name for the goal (3-50 chars), derived from the user's description",
+          focus_topics: "array of 3-8 relevant topic keywords, lowercase",
+          excluded_topics: "array of 0-5 topics to exclude, lowercase",
+          must_include_keywords: "array of 0-5 critical keywords, lowercase",
+          target_audience: "one of: General, Executive team, Product leadership, Engineering management, Marketing leadership, Research team",
+          lookback_days: "number 1-60",
+          max_items: "number 5-50"
+        }
+      },
+      step_3_generate_results: {
+        sources_mode: {
+          description: "Return 5-10 real, publicly accessible RSS/Atom feed URLs.",
+          rules: [
+            "Only suggest real, working RSS/Atom feed URLs",
+            "Prefer well-known, reliable sources with regular updates",
+            "type must be 'rss' or 'api'",
+            "Do NOT suggest URLs from the excluded_urls list"
+          ]
+        },
+        content_mode: {
+          description: "Return 5-20 actual, real content items that DIRECTLY answer the user's query.",
+          rules: [
+            "Items must be specific and relevant to exactly what the user asked for",
+            "Use real, working URLs",
+            "Be current and factual",
+            "Each item should directly match the user's described intent",
+            "Do NOT return generic websites or news pages — return actual results/items the user is looking for"
+          ]
+        }
+      }
+    },
+    output_schema: {
+      result_mode: "'sources' or 'content'",
+      goal: {
+        name: "string",
+        focus_topics: "string[]",
+        excluded_topics: "string[]",
+        must_include_keywords: "string[]",
+        target_audience: "string",
+        lookback_days: "number",
+        max_items: "number"
+      },
+      sources: "Array<{url, type, label, weight, reason}> — only if result_mode='sources'",
+      content_items: "Array<{title, url, description, source, relevance}> — only if result_mode='content'"
+    }
+  });
+
+  const userInput = JSON.stringify({
+    user_description: description,
+    excluded_urls: existingUrlsList.length > 0 ? existingUrlsList : undefined
+  });
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -231,7 +242,10 @@ export default defineEventHandler(async (event) => {
       model,
       temperature: 0.7,
       response_format: { type: "json_object" },
-      messages: [{ role: "user", content: prompt }]
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userInput }
+      ]
     })
   });
 
