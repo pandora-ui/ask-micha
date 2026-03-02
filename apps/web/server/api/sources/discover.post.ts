@@ -6,11 +6,22 @@ import { getDirectusClient } from "../../utils/directus";
 function isUrlSafe(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      return false;
     const hostname = parsed.hostname.toLowerCase();
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return false;
-    if (hostname.endsWith(".local") || hostname.endsWith(".internal")) return false;
-    if (hostname.startsWith("169.254.") || hostname === "metadata.google.internal") return false;
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1"
+    )
+      return false;
+    if (hostname.endsWith(".local") || hostname.endsWith(".internal"))
+      return false;
+    if (
+      hostname.startsWith("169.254.") ||
+      hostname === "metadata.google.internal"
+    )
+      return false;
     const parts = hostname.split(".");
     if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p))) {
       const a = Number(parts[0]);
@@ -57,9 +68,10 @@ async function callOpenAiForSources(args: {
   goalName: string;
   existingUrls: Set<string>;
 }): Promise<SuggestedSource[]> {
-  const existingList = args.existingUrls.size > 0
-    ? `\nAlready configured sources (do NOT suggest these URLs): ${[...args.existingUrls].join(", ")}`
-    : "";
+  const existingList =
+    args.existingUrls.size > 0
+      ? `\nAlready configured sources (do NOT suggest these URLs): ${[...args.existingUrls].join(", ")}`
+      : "";
 
   const prompt = [
     "You are an expert at finding high-quality RSS feeds and news API endpoints for intelligence monitoring.",
@@ -81,22 +93,22 @@ async function callOpenAiForSources(args: {
     "- Focus on RSS feeds (type: rss). Only suggest API endpoints (type: api) if they return JSON with news items.",
     "",
     "Return strict JSON with key: sources (array of objects with fields: url, type, label, weight, reason).",
-    "type must be either \"rss\" or \"api\".",
-    "Example: { \"sources\": [{ \"url\": \"https://example.com/feed.xml\", \"type\": \"rss\", \"label\": \"Example News\", \"weight\": 0.15, \"reason\": \"Covers topic X with daily updates\" }] }"
+    'type must be either "rss" or "api".',
+    'Example: { "sources": [{ "url": "https://example.com/feed.xml", "type": "rss", "label": "Example News", "weight": 0.15, "reason": "Covers topic X with daily updates" }] }',
   ].join("\n");
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${args.apiKey}`
+      Authorization: `Bearer ${args.apiKey}`,
     },
     body: JSON.stringify({
       model: args.model,
-      temperature: 0.7,
+      temperature: 1.0,
       response_format: { type: "json_object" },
-      messages: [{ role: "user", content: prompt }]
-    })
+      messages: [{ role: "user", content: prompt }],
+    }),
   });
 
   if (!response.ok) {
@@ -128,10 +140,10 @@ async function callOpenAiForSources(args: {
     .filter((s) => s.url && s.label)
     .map((s) => ({
       url: s.url!,
-      type: s.type === "api" ? "api" as const : "rss" as const,
+      type: s.type === "api" ? ("api" as const) : ("rss" as const),
       label: s.label!,
       weight: Math.min(0.5, Math.max(0.05, s.weight ?? 0.1)),
-      reason: s.reason ?? "Relevant to your goal topics"
+      reason: s.reason ?? "Relevant to your goal topics",
     }));
 }
 
@@ -151,7 +163,7 @@ async function validateFeedUrl(url: string): Promise<{
 
     const response = await fetch(url, {
       signal: controller.signal,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; RSS-Validator/1.0)" }
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; RSS-Validator/1.0)" },
     });
 
     if (!response.ok) {
@@ -161,7 +173,10 @@ async function validateFeedUrl(url: string): Promise<{
 
     const text = await response.text();
     clearTimeout(timer);
-    const isRss = text.includes("<rss") || text.includes("<feed") || text.includes("<rdf:RDF");
+    const isRss =
+      text.includes("<rss") ||
+      text.includes("<feed") ||
+      text.includes("<rdf:RDF");
 
     if (!isRss) {
       return { valid: false, error: "Not an RSS/Atom feed" };
@@ -186,7 +201,10 @@ export default defineEventHandler(async (event) => {
   const apiKey = config.openAiApiKey;
 
   if (!apiKey) {
-    throw createError({ statusCode: 500, message: "OpenAI API key not configured" });
+    throw createError({
+      statusCode: 500,
+      message: "OpenAI API key not configured",
+    });
   }
 
   const body = (await readBody(event)) as DiscoverRequest;
@@ -212,11 +230,13 @@ export default defineEventHandler(async (event) => {
     mustIncludeKeywords,
     targetAudience,
     goalName,
-    existingUrls
+    existingUrls,
   });
 
   // Filter out any sources whose URL already exists or that target internal URLs
-  const fresh = suggested.filter((s) => !existingUrls.has(s.url) && isUrlSafe(s.url));
+  const fresh = suggested.filter(
+    (s) => !existingUrls.has(s.url) && isUrlSafe(s.url),
+  );
 
   // Validate each suggested source in parallel
   const validated: ValidatedSource[] = await Promise.all(
@@ -231,13 +251,13 @@ export default defineEventHandler(async (event) => {
         valid: result.valid,
         feed_title: result.title,
         item_count: result.itemCount,
-        error: result.error
+        error: result.error,
       };
-    })
+    }),
   );
 
   return {
     suggestions: validated,
-    existing_count: currentPolicy.sources.length
+    existing_count: currentPolicy.sources.length,
   };
 });
